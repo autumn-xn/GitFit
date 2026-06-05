@@ -1,19 +1,31 @@
 # ─── backend/main.py ──────────────────────────────────────────────────────────
-# Step 1 — FastAPI app with stub /analyze endpoint.
-# Returns a hardcoded AnalysisResult so the full frontend ↔ backend
-# HTTP flow can be tested immediately, with no GitHub API or LLM calls yet.
+# Step 2 — Real GitHub data replaces the hardcoded stub.
+# The /analyze endpoint now calls github/reader.py and returns live repo data.
 #
 # Run with:  uvicorn main:app --reload
 # Or:        python main.py
+#
+# Create backend/.env (or project-root .env) with:
+#   GITHUB_TOKEN=ghp_your_token_here
+#
+# Without a token you still work, but GitHub limits you to 60 req/hr.
+# With a token you get 5 000 req/hr — enough for heavy development use.
 
 import re
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
+
+from github.reader import fetch_repo, RepoFetchResult
+
+# Must be called before any os.getenv() reads happen
+load_dotenv()
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -126,12 +138,10 @@ class AnalyzeResponse(BaseModel):
 
 app = FastAPI(
     title="GitHub Analyzer API",
-    version="0.1.0",
-    description="AI-powered GitHub repository analysis — Step 1 stub",
+    version="0.2.0",
+    description="AI-powered GitHub repository analysis — Step 2: real GitHub data",
 )
 
-# Allow the Vite dev server (port 5173) and a generic port 3000 to call us.
-# Expand this list in production or read it from .env.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -143,155 +153,220 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Stub data ────────────────────────────────────────────────────────────────
-# A realistic-looking AnalysisResult for facebook/react.
-# Every field matches the TypeScript type so the Results page renders
-# as soon as you build it — no waiting on the real API.
+# ─── Heuristic helpers (will be replaced by LLM calls in Step 4) ─────────────
 
-def _stub_activity() -> list[WeeklyActivity]:
-    """12 weeks of deterministic activity (no randomness → no test flakiness)."""
-    commits   = [45, 38, 62, 71, 55, 80, 48, 60, 53, 66, 74, 58]
-    additions = [2100, 1800, 3200, 4100, 2700, 5000, 2300, 3600, 2900, 3800, 4400, 3200]
-    deletions = [ 800,  600, 1100, 1500,  900, 1900,  700, 1300, 1000, 1400, 1700, 1200]
-    now = datetime.now(timezone.utc)
-    return [
-        WeeklyActivity(
-            week=(now - timedelta(weeks=11 - i)).strftime("%Y-%m-%dT00:00:00Z"),
-            commits=commits[i],
-            additions=additions[i],
-            deletions=deletions[i],
-        )
-        for i in range(12)
+def _heuristic_summary(fetch: RepoFetchResult) -> str:
+    """
+    Build a plain-English summary from fetched data.
+    Step 4 replaces this with a genuine LLM-generated architectural overview.
+    """
+    top_langs = [
+        r["language"] for r in fetch.lang_breakdown[:2]
+        if r["language"] != "Other"
     ]
+    lang_str = " and ".join(top_langs) if top_langs else "multiple languages"
+    pat_str  = ", ".join(fetch.arch_patterns[:2]) if fetch.arch_patterns else "a standard layout"
+    n_contrib = len(fetch.contributors)
+
+    return (
+        f"{fetch.info.full_name} is a {lang_str} project with "
+        f"{fetch.info.stars:,} stars and {n_contrib} tracked contributor"
+        f"{'s' if n_contrib != 1 else ''}. "
+        f"The codebase follows {pat_str}."
+    )
 
 
-_STUB_DATA = AnalysisResult(
-    meta=RepoMeta(
-        owner="facebook",
-        name="react",
-        full_name="facebook/react",
-        description="The library for web and native user interfaces.",
-        url="https://github.com/facebook/react",
-        stars=226_000,
-        forks=46_100,
-        open_issues=892,
-        watchers=6_700,
-        default_branch="main",
-        created_at="2013-05-24T16:15:54Z",
-        updated_at="2024-12-01T10:30:00Z",
-        license="MIT",
-        is_private=False,
-        topics=["javascript", "ui", "frontend", "declarative", "react"],
-    ),
-    languages=[
-        LanguageBreakdown(language="JavaScript", bytes=12_450_000, percentage=68.4),
-        LanguageBreakdown(language="TypeScript",  bytes=3_890_000, percentage=21.3),
-        LanguageBreakdown(language="HTML",          bytes=540_000, percentage=3.0),
-        LanguageBreakdown(language="CSS",           bytes=380_000, percentage=2.1),
-        LanguageBreakdown(language="Other",         bytes=960_000, percentage=5.2),
-    ],
-    contributors=[
-        Contributor(
-            login="gaearon",
-            avatar_url="https://avatars.githubusercontent.com/u/810438",
-            profile_url="https://github.com/gaearon",
-            contributions=3842,
+def _compute_quality_score(flags: dict[str, bool]) -> int:
+    """
+    Score 0–100 from detected quality signals.
+      50 base + up to 50 for good practices.
+    """
+    score = 50
+    score += 15 if flags.get("has_tests")  else 0
+    score += 15 if flags.get("has_ci")     else 0
+    score += 10 if flags.get("has_docs")   else 0
+    score += 7  if flags.get("has_linter") else 0
+    score += 3  if flags.get("has_docker") else 0
+    return min(score, 100)
+
+
+def _quality_notes(flags: dict[str, bool]) -> list[str]:
+    notes = []
+    if flags.get("has_tests"):
+        notes.append("Test suite detected.")
+    else:
+        notes.append("No test directory detected — consider adding automated tests.")
+    if flags.get("has_ci"):
+        notes.append("CI/CD pipeline configuration found.")
+    else:
+        notes.append("No CI configuration detected.")
+    if flags.get("has_docs"):
+        notes.append("Documentation folder present.")
+    if flags.get("has_linter"):
+        notes.append("Linter or formatter configuration found.")
+    else:
+        notes.append("No linter config detected — code style may be inconsistent.")
+    if flags.get("has_docker"):
+        notes.append("Docker support configured.")
+    return notes
+
+
+def _security_notes(flags: dict[str, bool]) -> list[str]:
+    notes = []
+    if flags.get("has_env_example"):
+        notes.append(".env.example present — good onboarding practice.")
+    else:
+        notes.append(
+            "No .env.example found; new contributors may miss required env vars."
+        )
+    if flags.get("exposes_secrets"):
+        notes.append("⚠ Possible secret file (.env / credentials) detected in the tree.")
+    else:
+        notes.append("No obvious secret files detected in the repository tree.")
+    notes.append(
+        "Dependency vulnerability audit requires runtime tooling (npm audit / pip-audit)."
+    )
+    return notes
+
+
+def _build_result(fetch: RepoFetchResult) -> AnalysisResult:
+    """
+    Convert a RepoFetchResult (from github/reader.py) into a fully
+    typed AnalysisResult that the frontend expects.
+    """
+    flags   = fetch.quality_flags
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return AnalysisResult(
+        meta=RepoMeta(
+            owner          = fetch.info.owner,
+            name           = fetch.info.name,
+            full_name      = fetch.info.full_name,
+            description    = fetch.info.description,
+            url            = fetch.info.html_url,
+            stars          = fetch.info.stars,
+            forks          = fetch.info.forks,
+            open_issues    = fetch.info.open_issues,
+            watchers       = fetch.info.watchers,
+            default_branch = fetch.info.default_branch,
+            created_at     = fetch.info.created_at,
+            updated_at     = fetch.info.updated_at,
+            license        = fetch.info.license_name,
+            is_private     = fetch.info.is_private,
+            topics         = fetch.info.topics,
         ),
-        Contributor(
-            login="sebmarkbage",
-            avatar_url="https://avatars.githubusercontent.com/u/63648",
-            profile_url="https://github.com/sebmarkbage",
-            contributions=2910,
-        ),
-        Contributor(
-            login="acdlite",
-            avatar_url="https://avatars.githubusercontent.com/u/3624098",
-            profile_url="https://github.com/acdlite",
-            contributions=2104,
-        ),
-        Contributor(
-            login="sophiebits",
-            avatar_url="https://avatars.githubusercontent.com/u/6820473",
-            profile_url="https://github.com/sophiebits",
-            contributions=1876,
-        ),
-    ],
-    activity=_stub_activity(),
-    architecture=ArchitectureInsight(
-        summary=(
-            "React is a monorepo organised around independently publishable packages. "
-            "The core reconciler (react-reconciler) is renderer-agnostic; concrete "
-            "renderers such as react-dom plug into it via a HostConfig interface."
-        ),
-        patterns=["Monorepo", "Plugin architecture", "Virtual DOM", "Fiber reconciler"],
-        entry_points=["packages/react/index.js", "packages/react-dom/index.js"],
-        key_directories=["packages/", "scripts/", "fixtures/", "__tests__/"],
-    ),
-    code_quality=CodeQuality(
-        score=91,
-        has_tests=True,
-        has_ci=True,
-        has_docs=True,
-        has_linter=True,
-        has_docker=False,
-        notes=[
-            "Comprehensive Jest test suite with >95% coverage on core packages.",
-            "GitHub Actions CI runs tests across multiple Node versions.",
-            "ESLint enforced project-wide with custom react-hooks plugin rules.",
-            "No Dockerfile — library packages are not typically containerised.",
+        languages=[
+            LanguageBreakdown(
+                language   = row["language"],
+                bytes      = row["bytes"],
+                percentage = row["percentage"],
+            )
+            for row in fetch.lang_breakdown
         ],
-    ),
-    security=SecurityFlags(
-        has_env_example=False,
-        exposes_secrets=False,
-        dependency_audit="clean",
-        notes=[
-            "No server-side secrets — pure frontend library.",
-            "Dependabot enabled; no high-severity advisories detected.",
+        contributors=[
+            Contributor(
+                login        = c.login,
+                avatar_url   = c.avatar_url,
+                profile_url  = c.profile_url,
+                contributions= c.contributions,
+            )
+            for c in fetch.contributors
         ],
-    ),
-    # analyzed_at is intentionally blank here; the endpoint fills it fresh
-    # on every request so the timestamp in the UI is always accurate.
-    analyzed_at="",
-)
+        activity=[
+            WeeklyActivity(
+                week      = w.week_iso,
+                commits   = w.commits,
+                additions = w.additions,
+                deletions = w.deletions,
+            )
+            for w in fetch.weekly_activity
+        ],
+        architecture=ArchitectureInsight(
+            summary         = _heuristic_summary(fetch),
+            patterns        = fetch.arch_patterns,
+            entry_points    = fetch.entry_points,
+            key_directories = fetch.key_directories,
+        ),
+        code_quality=CodeQuality(
+            score      = _compute_quality_score(flags),
+            has_tests  = flags["has_tests"],
+            has_ci     = flags["has_ci"],
+            has_docs   = flags["has_docs"],
+            has_linter = flags["has_linter"],
+            has_docker = flags["has_docker"],
+            notes      = _quality_notes(flags),
+        ),
+        security=SecurityFlags(
+            has_env_example  = flags["has_env_example"],
+            exposes_secrets  = flags["exposes_secrets"],
+            dependency_audit = "unknown",   # Step 4: LLM / runtime audit
+            notes            = _security_notes(flags),
+        ),
+        analyzed_at=now_str,
+    )
+
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["meta"])
 async def health() -> dict:
-    """
-    Liveness check.
-    The frontend calls this on startup (see api/client.ts → checkHealth).
-    """
-    return {"status": "ok", "version": "0.1.0"}
+    """Liveness check called by the frontend on startup."""
+    return {"status": "ok", "version": "0.2.0"}
 
 
 @app.post("/analyze", response_model=AnalyzeResponse, tags=["analysis"])
 async def analyze(body: AnalyzeRequest) -> AnalyzeResponse:
     """
-    STEP 1 — Stub endpoint.
+    Step 2 — Live GitHub data.
 
-    Accepts any valid github.com URL and returns a hardcoded AnalysisResult
-    for facebook/react. The URL is validated but not actually fetched yet.
-
-    Steps 2–4 replace this with:
-      • github/reader.py  →  real GitHub API data
-      • prompts/analysis.py + LLM call  →  real AI analysis
-      • agent/workflow.py  →  multi-step LangGraph agent
+    Fetches real repository data from the GitHub REST API.
+    Architecture summary and quality notes are heuristic for now;
+    Step 4 (LLM integration) will replace them with AI-generated content.
     """
     log.info("analyze  url=%s", body.url)
 
-    # Stamp the current time on each response so the UI shows a fresh timestamp
-    result = _STUB_DATA.model_copy(
-        update={"analyzed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-    )
+    try:
+        fetch = await fetch_repo(body.url)
+        return AnalyzeResponse(success=True, data=_build_result(fetch))
 
-    return AnalyzeResponse(success=True, data=result)
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status == 404:
+            msg = (
+                "Repository not found. "
+                "Check the URL and make sure the repo is public."
+            )
+        elif status in (403, 429):
+            msg = (
+                "GitHub API rate limit reached. "
+                "Add GITHUB_TOKEN=ghp_... to your backend/.env file "
+                "for 5 000 requests/hour."
+            )
+        else:
+            msg = f"GitHub API returned an unexpected error (HTTP {status})."
+        log.warning("GitHub API error  url=%s  status=%d", body.url, status)
+        return AnalyzeResponse(success=False, error=msg)
+
+    except ValueError as exc:
+        # parse_github_url raised — shouldn't normally reach here because
+        # the Pydantic validator on AnalyzeRequest already checks the URL,
+        # but keep it as a safety net.
+        return AnalyzeResponse(success=False, error=str(exc))
+
+    except httpx.TimeoutException:
+        log.warning("GitHub API timeout  url=%s", body.url)
+        return AnalyzeResponse(
+            success=False,
+            error="GitHub API timed out. Please try again in a moment.",
+        )
+
+    except Exception as exc:
+        log.exception("Unexpected error  url=%s", body.url)
+        return AnalyzeResponse(success=False, error=f"Unexpected error: {exc}")
 
 
 # ─── Dev entry point ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
