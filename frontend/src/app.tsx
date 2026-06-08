@@ -1,11 +1,17 @@
-import RepoInput from "./components/RepoInput";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import Home from "./pages/Home";
+import Results from "./pages/Results";
+import NotFound from "./pages/NotFound";
 
 function App() {
   return (
-    <RepoInput
-      onSubmit={(url) => console.log(url)}
-      isLoading={false}
-    />
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/results" element={<Results />} />
+        <Route path="*" element={<NotFound />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
 
