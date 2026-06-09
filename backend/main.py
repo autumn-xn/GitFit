@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
 from github.reader import fetch_repo, RepoFetchResult
+from agent.workflow import analyze_with_llm
 
 # Must be called before any os.getenv() reads happen
 load_dotenv()
@@ -229,13 +230,46 @@ def _security_notes(flags: dict[str, bool]) -> list[str]:
     return notes
 
 
-def _build_result(fetch: RepoFetchResult) -> AnalysisResult:
+def _build_result(
+    fetch: RepoFetchResult,
+    llm_analysis: dict | None = None,
+) -> AnalysisResult:
     """
     Convert a RepoFetchResult (from github/reader.py) into a fully
     typed AnalysisResult that the frontend expects.
+
+    If llm_analysis is provided (from the AI agent), its insights
+    replace the heuristic placeholders.  If None, the heuristic
+    fallback path runs exactly as before.
     """
     flags   = fetch.quality_flags
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # ── AI-enriched vs heuristic fallback ─────────────────────────────────
+    if llm_analysis:
+        ai_arch = llm_analysis.get("architecture", {})
+        ai_cq   = llm_analysis.get("code_quality", {})
+        ai_sec  = llm_analysis.get("security", {})
+
+        summary          = ai_arch.get("summary", _heuristic_summary(fetch))
+        patterns         = ai_arch.get("patterns", fetch.arch_patterns)
+
+        base_score       = _compute_quality_score(flags)
+        adjustment       = int(ai_cq.get("score_adjustment", 0))
+        quality_score    = max(0, min(100, base_score + adjustment))
+        quality_notes_ls = ai_cq.get("notes", _quality_notes(flags))
+
+        dep_audit        = ai_sec.get("dependency_audit", "unknown")
+        sec_notes_ls     = ai_sec.get("notes", _security_notes(flags))
+
+        log.info("Using AI-generated analysis (score adj: %+d)", adjustment)
+    else:
+        summary          = _heuristic_summary(fetch)
+        patterns         = fetch.arch_patterns
+        quality_score    = _compute_quality_score(flags)
+        quality_notes_ls = _quality_notes(flags)
+        dep_audit        = "unknown"
+        sec_notes_ls     = _security_notes(flags)
 
     return AnalysisResult(
         meta=RepoMeta(
@@ -282,25 +316,25 @@ def _build_result(fetch: RepoFetchResult) -> AnalysisResult:
             for w in fetch.weekly_activity
         ],
         architecture=ArchitectureInsight(
-            summary         = _heuristic_summary(fetch),
-            patterns        = fetch.arch_patterns,
+            summary         = summary,
+            patterns        = patterns,
             entry_points    = fetch.entry_points,
             key_directories = fetch.key_directories,
         ),
         code_quality=CodeQuality(
-            score      = _compute_quality_score(flags),
+            score      = quality_score,
             has_tests  = flags["has_tests"],
             has_ci     = flags["has_ci"],
             has_docs   = flags["has_docs"],
             has_linter = flags["has_linter"],
             has_docker = flags["has_docker"],
-            notes      = _quality_notes(flags),
+            notes      = quality_notes_ls,
         ),
         security=SecurityFlags(
             has_env_example  = flags["has_env_example"],
             exposes_secrets  = flags["exposes_secrets"],
-            dependency_audit = "unknown",   # Step 4: LLM / runtime audit
-            notes            = _security_notes(flags),
+            dependency_audit = dep_audit,
+            notes            = sec_notes_ls,
         ),
         analyzed_at=now_str,
     )
@@ -327,7 +361,11 @@ async def analyze(body: AnalyzeRequest) -> AnalyzeResponse:
 
     try:
         fetch = await fetch_repo(body.url)
-        return AnalyzeResponse(success=True, data=_build_result(fetch))
+
+        # Step 4: AI-powered analysis (gracefully falls back to heuristics)
+        llm_analysis = await analyze_with_llm(fetch)
+
+        return AnalyzeResponse(success=True, data=_build_result(fetch, llm_analysis))
 
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
