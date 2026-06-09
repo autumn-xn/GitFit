@@ -6,6 +6,11 @@
 import { useLocation, useNavigate } from "react-router-dom";
 import type { AnalysisResult } from "../types";
 
+import ActivityGraph from "../components/ActivityGraph";
+import TechStackChart from "../components/TechStackChart";
+import ArchDiagram from "../components/ArchDiagram";
+import RepoImage from "../components/RepoImage";
+
 // ─── Keyframes & Global CSS ───────────────────────────────────────────────────
 function injectKF() {
   if (document.getElementById("results-kf")) return;
@@ -329,6 +334,8 @@ export default function Results() {
                 </div>
               )}
             </div>
+
+            <ArchDiagram patterns={architecture.patterns} dirs={architecture.key_directories} />
           </Card>
 
           <Card className="col-span-4" delay="0.15s">
@@ -419,6 +426,26 @@ export default function Results() {
               })}
             </div>
           </Card>
+        </div>
+
+        {/* ── BENTO ROW 3 ─────────────────────────────────────────── */}
+        <div className="bento-grid">
+          <Card className="col-span-8" delay="0.35s">
+            <SectionHead icon="📈" label="Commit Activity Timeline" />
+            <ActivityGraph activity={activity} />
+          </Card>
+          
+          <Card className="col-span-4" delay="0.4s">
+            <SectionHead icon="🌐" label="Technology Stack" />
+            <TechStackChart languages={languages} />
+          </Card>
+        </div>
+        
+        {/* ── BENTO ROW 4 ─────────────────────────────────────────── */}
+        <div className="bento-grid">
+          <div className="col-span-12" style={{ height: '300px', animation: "fadeUp 0.7s cubic-bezier(0.165, 0.84, 0.44, 1) 0.45s both" }}>
+             <RepoImage owner={meta.owner} name={meta.name} />
+          </div>
         </div>
 
         {/* ── FOOTER METADATA ─────────────────────────────────────────── */}
