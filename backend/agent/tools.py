@@ -1,11 +1,11 @@
 # ─── backend/agent/tools.py ──────────────────────────────────────────────────
 # LLM interaction layer for repository analysis.
 #
-# Uses Google Gemini via LangChain.  Falls back gracefully when
-# GOOGLE_API_KEY is not set — the caller receives a RuntimeError
+# Uses Groq via LangChain. Falls back gracefully when
+# GROQ_API_KEY is not set — the caller receives a RuntimeError
 # which the workflow translates into a None result (heuristic fallback).
 #
-# Override the model with the LLM_MODEL env var (default: gemini-2.0-flash).
+# Override the model with the LLM_MODEL env var (default: llama3-8b-8192).
 # ─────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -16,30 +16,30 @@ import os
 import re
 from typing import Optional
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
 
 log = logging.getLogger("github_analyzer.agent")
 
 # ─── Defaults ─────────────────────────────────────────────────────────────────
 
-_DEFAULT_MODEL = "gemini-2.0-flash"
+_DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
 
 # ─── Model factory ────────────────────────────────────────────────────────────
 
 
-def _get_model() -> Optional[ChatGoogleGenerativeAI]:
+def _get_model() -> Optional[ChatGroq]:
     """
     Create the LLM client.
 
     Returns None if no API key is configured, letting the caller
     decide whether to raise or fall back.
     """
-    api_key = os.getenv("GOOGLE_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         log.warning(
-            "GOOGLE_API_KEY not set — LLM analysis disabled, "
+            "GROQ_API_KEY not set — LLM analysis disabled, "
             "using heuristic fallback"
         )
         return None
@@ -47,11 +47,11 @@ def _get_model() -> Optional[ChatGoogleGenerativeAI]:
     model_name = os.getenv("LLM_MODEL", _DEFAULT_MODEL)
     log.info("Using LLM model: %s", model_name)
 
-    return ChatGoogleGenerativeAI(
+    return ChatGroq(
         model=model_name,
-        google_api_key=api_key,
+        api_key=api_key,
         temperature=0.2,
-        max_output_tokens=2048,
+        max_tokens=2048,
         timeout=30,
     )
 
