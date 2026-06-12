@@ -40,27 +40,124 @@ import httpx
 
 _API_BASE = "https://api.github.com"
 
-_GITHUB_URL_RE = re.compile(
-    r"^https?://(www\.)?github\.com/"
-    r"(?P<owner>[\w.\-]+)/(?P<repo>[\w.\-]+)"
+_OWNER = r"[\w.\-]+"
+
+# owner/repo  (no scheme)
+_SLUG_RE = re.compile(
+    rf"^(?P<owner>{_OWNER})/(?P<repo>{_OWNER})(?:\.git)?(?:[/?#].*)?$",
+    re.IGNORECASE,
 )
+
+# github.com/owner/repo  with optional scheme and trailing paths
+_GITHUB_HOST_RE = re.compile(
+    rf"^(?:https?://)?(?:www\.)?github\.com/"
+    rf"(?P<owner>{_OWNER})/(?P<repo>{_OWNER})"
+    rf"(?:\.git)?(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
+
+_RESOLVE_HEADERS = {"User-Agent": "GitFit/0.2 (+repo-analyzer)"}
 
 # ─── URL parser ───────────────────────────────────────────────────────────────
 
 
 def parse_github_url(url: str) -> tuple[str, str]:
     """
-    Extract (owner, repo) from a GitHub URL.
+    Extract (owner, repo) from a GitHub URL or ``owner/repo`` slug.
+
+    Accepts:
+      - ``vercel/next.js``
+      - ``github.com/vercel/next.js``
+      - ``https://github.com/vercel/next.js/tree/main``
 
     Raises
     ------
     ValueError
-        URL is not a recognisable github.com repository link.
+        Input is not a recognisable GitHub repository reference.
     """
-    m = _GITHUB_URL_RE.match(url.strip())
-    if not m:
-        raise ValueError(f"Not a valid GitHub repository URL: {url!r}")
-    return m.group("owner"), m.group("repo")
+    s = url.strip()
+    if not s:
+        raise ValueError("URL cannot be empty")
+
+    if "://" not in s and "github.com" not in s.lower():
+        m = _SLUG_RE.match(s)
+        if m:
+            return m.group("owner"), m.group("repo")
+
+    m = _GITHUB_HOST_RE.match(s)
+    if m:
+        return m.group("owner"), m.group("repo")
+
+    raise ValueError(f"Not a valid GitHub repository URL: {url!r}")
+
+
+def canonical_repo_url(owner: str, repo: str) -> str:
+    """Return the normalised https://github.com/owner/repo link."""
+    return f"https://github.com/{owner}/{repo}"
+
+
+def repo_cache_key(owner: str, repo: str) -> str:
+    """Stable cache key regardless of how the user typed the repo."""
+    return f"{owner}/{repo}".lower()
+
+
+def _extract_github_url_from_html(text: str) -> Optional[str]:
+    """Some shorteners (e.g. lnkd.in) embed the target URL in the page body."""
+    m = re.search(
+        rf"https?://(?:www\.)?github\.com/{_OWNER}/{_OWNER}",
+        text,
+        re.IGNORECASE,
+    )
+    return m.group(0) if m else None
+
+
+async def resolve_repo_url(raw: str) -> tuple[str, str, str]:
+    """
+    Resolve any user input to ``(owner, repo, canonical_url)``.
+
+    Direct GitHub shapes are parsed locally.  Short links and other
+    redirectors (e.g. ``lnkd.in/...``) are followed over HTTP until a
+    ``github.com/owner/repo`` destination is found.
+    """
+    try:
+        owner, repo = parse_github_url(raw)
+        return owner, repo, canonical_repo_url(owner, repo)
+    except ValueError:
+        pass
+
+    s = raw.strip()
+    if not s:
+        raise ValueError("URL cannot be empty")
+
+    if not re.match(r"^https?://", s, re.IGNORECASE):
+        s = f"https://{s}"
+
+    async with httpx.AsyncClient(
+        headers          = _RESOLVE_HEADERS,
+        follow_redirects = True,
+        timeout          = httpx.Timeout(10.0, connect=5.0),
+    ) as client:
+        try:
+            r = await client.get(s)
+            r.raise_for_status()
+            final = str(r.url)
+        except httpx.HTTPError as exc:
+            raise ValueError(
+                f"Could not resolve link to a GitHub repository: {raw!r}"
+            ) from exc
+
+    try:
+        owner, repo = parse_github_url(final)
+    except ValueError:
+        embedded = _extract_github_url_from_html(r.text)
+        if embedded:
+            owner, repo = parse_github_url(embedded)
+        else:
+            raise ValueError(
+                f"Link does not point to a GitHub repository (resolved to {final!r})"
+            ) from None
+
+    return owner, repo, canonical_repo_url(owner, repo)
 
 
 # ─── Data containers ──────────────────────────────────────────────────────────
@@ -493,7 +590,8 @@ async def fetch_repo(
     Parameters
     ----------
     url :
-        Full GitHub URL — e.g. ``"https://github.com/vercel/next.js"``.
+        GitHub repo reference — full URL, ``github.com/owner/repo``,
+        ``owner/repo``, or a short link that redirects to GitHub.
     token :
         GitHub personal-access token.  Falls back to the ``GITHUB_TOKEN``
         environment variable.  Without a token, GitHub limits you to
@@ -519,7 +617,7 @@ async def fetch_repo(
         Network or connect timeout exceeded.
     """
     token = token or os.getenv("GITHUB_TOKEN")
-    owner, repo = parse_github_url(url)
+    owner, repo, _ = await resolve_repo_url(url)
 
     async with httpx.AsyncClient(
         headers          = _headers(token),

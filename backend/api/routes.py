@@ -19,7 +19,7 @@ from api.schemas import (
     CodeQuality,
     SecurityFlags,
 )
-from github.reader import fetch_repo, RepoFetchResult
+from github.reader import fetch_repo, RepoFetchResult, resolve_repo_url, repo_cache_key
 from agent.workflow import analyze_with_llm
 
 log = logging.getLogger("github_analyzer.routes")
@@ -234,16 +234,19 @@ async def analyze(body: AnalyzeRequest) -> AnalyzeResponse:
     log.info("analyze  url=%s", body.url)
 
     try:
-        cached_result = _analyze_cache.get(body.url)
+        owner, repo, canonical = await resolve_repo_url(body.url)
+        cache_key = repo_cache_key(owner, repo)
+
+        cached_result = _analyze_cache.get(cache_key)
         if cached_result:
-            log.info("Returning cached analysis for %s", body.url)
+            log.info("Returning cached analysis for %s", cache_key)
             return AnalyzeResponse(success=True, data=cached_result)
 
-        fetch = await fetch_repo(body.url)
+        fetch = await fetch_repo(canonical)
         llm_analysis = await analyze_with_llm(fetch)
         
         result = _build_result(fetch, llm_analysis)
-        _analyze_cache.set(body.url, result)
+        _analyze_cache.set(cache_key, result)
 
         return AnalyzeResponse(success=True, data=result)
 

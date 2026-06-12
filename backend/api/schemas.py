@@ -1,5 +1,4 @@
 # ─── backend/api/schemas.py ───────────────────────────────────────────────────
-import re
 from typing import Optional
 from pydantic import BaseModel, field_validator
 
@@ -82,12 +81,14 @@ class AnalyzeRequest(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def must_be_github_repo(cls, v: str) -> str:
-        """Reject anything that isn't a github.com/owner/repo URL."""
-        pattern = r"^https?://(www\.)?github\.com/[\w.\-]+/[\w.\-]+"
-        if not re.match(pattern, v.strip()):
-            raise ValueError("Must be a valid github.com repository URL")
-        return v.strip()
+    def strip_url(cls, v: str) -> str:
+        """Trim whitespace; detailed validation happens in github.reader."""
+        s = v.strip()
+        if not s:
+            raise ValueError("Please enter a repository link or owner/repo.")
+        if len(s) > 2048:
+            raise ValueError("URL is too long.")
+        return s
 
 
 class AnalyzeResponse(BaseModel):

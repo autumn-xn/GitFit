@@ -20,19 +20,24 @@ interface ExampleRepo {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const EXAMPLE_REPOS: ExampleRepo[] = [
-  { label: "facebook/react",   url: "https://github.com/facebook/react",   icon: "⚛" },
-  { label: "vercel/next.js",   url: "https://github.com/vercel/next.js",   icon: "▲" },
-  { label: "microsoft/vscode", url: "https://github.com/microsoft/vscode", icon: "◈" },
+  { label: "google/skills",   url: "https://github.com/google/skills",   icon: "⚛" },
+  { label: "apple/container",   url: "https://github.com/apple/container",   icon: "▲" },
+  { label: "addyosmani/agent-skills", url: "https://github.com/addyosmani/agent-skills", icon: "◈" },
 ];
 
-const GITHUB_REGEX =
-  /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/.*)?$/;
+const SLUG_REGEX = /^[\w.-]+\/[\w.-]+(\/.*)?$/;
+const GITHUB_HOST_REGEX =
+  /^(?:https?:\/\/)?(?:www\.)?github\.com\/[\w.-]+\/[\w.-]+/i;
+const EXTERNAL_LINK_REGEX =
+  /^(?:https?:\/\/\S+|[\w.-]+\.[\w.-]+\/\S+)$/i;
 
 function validateUrl(url: string): string | null {
-  if (!url.trim()) return "Please enter a GitHub repository URL.";
-  if (!GITHUB_REGEX.test(url.trim()))
-    return "Must be a valid github.com repository URL.";
-  return null;
+  const s = url.trim();
+  if (!s) return "Please enter a repository link or owner/repo.";
+  if (SLUG_REGEX.test(s) && !s.includes("://")) return null;
+  if (GITHUB_HOST_REGEX.test(s)) return null;
+  if (EXTERNAL_LINK_REGEX.test(s)) return null;
+  return "Enter owner/repo, a GitHub link, or a short link to a repo.";
 }
 
 // ─── Keyframe injection ───────────────────────────────────────────────────────
@@ -182,7 +187,7 @@ export default function RepoInput({
           <input
             ref={inputRef}
             style={S.input}
-            type="url"
+            type="text"
             value={url}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
