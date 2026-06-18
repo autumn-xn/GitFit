@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -80,6 +80,21 @@ class CommitAnalysis:
     single_author_ratio: float      # Top author % of commits
     commit_message_quality: str     # "excellent", "good", "poor"
     commit_frequency_rating: str    # "very_active", "active", "stable", "inactive"
+    
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "frequency": asdict(self.frequency),
+            "trend": asdict(self.trend),
+            "authors": [asdict(a) for a in self.authors],
+            "message_patterns": asdict(self.message_patterns),
+            "longest_commit_streak": self.longest_commit_streak,
+            "most_active_hour": self.most_active_hour,
+            "most_active_day_of_week": self.most_active_day_of_week,
+            "single_author_ratio": self.single_author_ratio,
+            "commit_message_quality": self.commit_message_quality,
+            "commit_frequency_rating": self.commit_frequency_rating,
+        }
 
 
 # ─── Git Command Wrappers ─────────────────────────────────────────────────────
@@ -257,7 +272,7 @@ def _compute_trend(commits_list: list[tuple[str, int]]) -> CommitTrend:
         trend = "stable"
     
     # Days since last commit
-    if commits_30:
+    if commits_list:
         last_commit_ts = max(ts for _, ts in commits_list)
         days_since = (now - last_commit_ts) / (24 * 3600)
     else:

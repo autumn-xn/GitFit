@@ -1,20 +1,18 @@
 # ─── backend/main.py ──────────────────────────────────────────────────────────
-# Step 3 — Refactoring.
-# Pydantic models are in api/schemas.py, and routes/logic in api/routes.py.
-#
-# Run with:  uvicorn main:app --reload
-# Or:        python main.py
-# ──────────────────────────────────────────────────────────────────────────────
-
 import logging
+import os
+import sys
+from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+# ✅ ADD BACKEND TO PATH so it can find api module
+backend_dir = Path(__file__).parent
+sys.path.insert(0, str(backend_dir))
+
 # Must be called before any os.getenv() reads happen
 load_dotenv()
-
-# ─── Logging ──────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,12 +20,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("github_analyzer")
 
-# ─── FastAPI app ──────────────────────────────────────────────────────────────
-
 app = FastAPI(
     title="GitHub Analyzer API",
     version="0.3.0",
-    description="AI-powered GitHub repository analysis — Refactored",
+    description="AI-powered GitHub repository analysis — GitFit v2",
 )
 
 app.add_middleware(
@@ -41,13 +37,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Import and Register Routes ───────────────────────────────────────────────
-
+# ✅ NOW THIS WORKS
 from api.routes import router
 app.include_router(router)
 
-# ─── Dev entry point ──────────────────────────────────────────────────────────
+@app.get("/", tags=["meta"])
+async def root():
+    return {
+        "message": "GitFit API is running",
+        "version": "0.3.0",
+        "docs": "/docs",
+    }
 
 if __name__ == "__main__":
     import uvicorn
+    log.info("Starting GitFit API...")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

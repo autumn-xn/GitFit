@@ -279,7 +279,9 @@ class DependencyAnalyzer:
         """Parse Cargo.toml (Rust)"""
         deps = []
         try:
-            import tomllib if hasattr(__import__('sys'), 'version_info') and __import__('sys').version_info >= (3, 11) else None
+            import tomllib
+        except ImportError:
+            tomllib = None
             
             # Fallback TOML parsing for older Python versions
             if tomllib is None:
