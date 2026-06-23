@@ -14,7 +14,7 @@ You are a senior software architect and code reviewer. You are analyzing a \
 GitHub repository based on its README, file tree, language breakdown, and \
 detected quality signals.
 
-Your task is to produce a structured JSON analysis with three sections: \
+Your task is to produce a structured JSO    N analysis with three sections: \
 architecture, code_quality, and security.
 
 Rules:
